@@ -144,6 +144,7 @@
 
   <div class="card">
     <h2><span class="num">1</span>อัปโหลดไฟล์</h2>
+    <p class="subnote" style="margin-top:-10px;">ใส่ไฟล์ 2 อันสลับช่องกันก็ได้ครับ ระบบตรวจสอบเนื้อหาไฟล์และจัดให้ถูกต้องอัตโนมัติ</p>
     <div class="row2">
       <div class="drop" id="drop-template">
         <div class="icon">📗</div>
@@ -227,8 +228,50 @@ function wireDropzone(dropId, fileId, nameId, onFile){
   }
 }
 
-wireDropzone('drop-template','file-template','name-template', buf=>{ templateBuf = buf; checkReady(); });
-wireDropzone('drop-source','file-source','name-source', buf=>{ sourceBuf = buf; checkReady(); });
+wireDropzone('drop-template','file-template','name-template', buf=>{ templateBuf = buf; checkReady(); autoAssign(); });
+wireDropzone('drop-source','file-source','name-source', buf=>{ sourceBuf = buf; checkReady(); autoAssign(); });
+
+function identifyBuffer(buf){
+  if (!buf) return 'unknown';
+  try{
+    const wb = XLSX.read(buf, {type:'array'});
+    if (wb.SheetNames.includes('ชื่อลูกค้า') && wb.SheetNames.includes('ใบยาว')) return 'template';
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null});
+    if (findHeaderRow(aoa) >= 0) return 'source';
+  } catch(e){}
+  return 'unknown';
+}
+
+function autoAssign(){
+  if (!templateBuf || !sourceBuf) return;
+  const kindInTemplateSlot = identifyBuffer(templateBuf);
+  const kindInSourceSlot = identifyBuffer(sourceBuf);
+  const noteId = 'auto-assign-note';
+  let note = document.getElementById(noteId);
+  if (!note){
+    note = document.createElement('div');
+    note.id = noteId;
+    note.style.cssText = 'font-size:12px;color:var(--sub-dim);margin-top:10px;font-family:var(--mono);';
+    document.querySelector('#drop-source').parentElement.after(note);
+  }
+  if (kindInTemplateSlot === 'source' && kindInSourceSlot === 'template'){
+    // swapped: fix silently
+    [templateBuf, sourceBuf] = [sourceBuf, templateBuf];
+    const nameTemplateEl = document.getElementById('name-template');
+    const nameSourceEl = document.getElementById('name-source');
+    const tmp = nameTemplateEl.textContent;
+    nameTemplateEl.textContent = nameSourceEl.textContent;
+    nameSourceEl.textContent = tmp;
+    note.textContent = '✓ ตรวจพบว่าใส่ไฟล์สลับช่อง ระบบจัดให้ถูกต้องอัตโนมัติแล้ว';
+    note.style.color = 'var(--good)';
+  } else if (kindInTemplateSlot === 'template' && kindInSourceSlot === 'source'){
+    note.textContent = '✓ ไฟล์ทั้งสองถูกต้องตามช่องแล้ว';
+    note.style.color = 'var(--good)';
+  } else {
+    note.textContent = '';
+  }
+}
 
 function checkReady(){ document.getElementById('btn-parse').disabled = !(templateBuf && sourceBuf); }
 
