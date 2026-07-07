@@ -421,76 +421,117 @@ function buildCustomerMap(templateWb){
   return aoa.length;
 }
 
-// ---- XML-surgery helpers: edit the sheet XML directly so all original
-// formatting (borders, fonts, merges, tables) stays byte-identical ----
-const XLNS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-const XMLNS_XML = 'http://www.w3.org/XML/1998/namespace';
+// ---- XML-surgery helpers: edit the sheet XML as plain text so every byte
+// of the original file (borders, fonts, merges, tables, namespaces) that we
+// don't touch stays completely untouched — this avoids any DOM
+// parse/serialize round-trip that could subtly alter the file and trigger
+// Excel's "we found a problem" repair prompt. ----
+
+function xmlEscape(str){
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+}
+
+function indexRows(sheetXml){
+  const rows = {};
+  const openRe = /<row r="(\d+)"[^>]*?\/?>/g;
+  let om;
+  while ((om = openRe.exec(sheetXml))){
+    const rowNum = parseInt(om[1], 10);
+    const openTag = om[0];
+    const startIdx = om.index;
+    let endIdx;
+    if (openTag.endsWith('/>')){
+      endIdx = startIdx + openTag.length;
+    } else {
+      const closeIdx = sheetXml.indexOf('</row>', startIdx + openTag.length);
+      if (closeIdx === -1) continue;
+      endIdx = closeIdx + 6;
+    }
+    rows[rowNum] = {text: sheetXml.slice(startIdx, endIdx), start: startIdx, end: endIdx};
+    openRe.lastIndex = endIdx;
+  }
+  return rows;
+}
+function getCellInRow(rowXml, ref){
+  const openRe = new RegExp(`<c r="${ref}"[^>]*?/?>`);
+  const om = rowXml.match(openRe);
+  if (!om) return null;
+  const openTag = om[0];
+  const startIdx = om.index;
+  if (openTag.endsWith('/>')){
+    return {text: openTag, index: startIdx, length: openTag.length};
+  }
+  const closeIdx = rowXml.indexOf('</c>', startIdx + openTag.length);
+  if (closeIdx === -1) return null;
+  const endIdx = closeIdx + 4;
+  return {text: rowXml.slice(startIdx, endIdx), index: startIdx, length: endIdx-startIdx};
+}
+function getAttr(cellText, name){
+  const m = cellText.match(new RegExp(name+'="([^"]*)"'));
+  return m ? m[1] : null;
+}
+function buildCellXml(ref, sAttr, kind, content){
+  const sPart = sAttr!=null ? ` s="${sAttr}"` : '';
+  if (kind === 'empty') return `<c r="${ref}"${sPart}/>`;
+  if (kind === 'number') return `<c r="${ref}"${sPart}><v>${content}</v></c>`;
+  if (kind === 'inlineStr') return `<c r="${ref}"${sPart} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(content)}</t></is></c>`;
+  if (kind === 'formula') return `<c r="${ref}"${sPart}><f>${xmlEscape(content)}</f></c>`;
+  throw new Error('unknown cell kind '+kind);
+}
+
+class RowEditor {
+  constructor(sheetXml){
+    this.sheetXml = sheetXml;
+    this.rows = indexRows(sheetXml);
+  }
+  setCell(rowNum, colLetter, kind, content){
+    const rowInfo = this.rows[rowNum];
+    if (!rowInfo) throw new Error('ไม่พบแถวที่ '+rowNum+' ในชีตใบยาว (โครงสร้างไฟล์แบบฟอร์มอาจต่างจากที่คาดไว้)');
+    const ref = colLetter+rowNum;
+    const cell = getCellInRow(rowInfo.text, ref);
+    if (!cell) throw new Error('ไม่พบเซลล์ '+ref+' ในชีตใบยาว');
+    const sAttr = getAttr(cell.text, 's');
+    const newCellXml = buildCellXml(ref, sAttr, kind, content);
+    rowInfo.text = rowInfo.text.slice(0, cell.index) + newCellXml + rowInfo.text.slice(cell.index+cell.length);
+  }
+  clearCell(rowNum, colLetter){
+    const rowInfo = this.rows[rowNum];
+    if (!rowInfo) return;
+    const ref = colLetter+rowNum;
+    const cell = getCellInRow(rowInfo.text, ref);
+    if (!cell) return;
+    const sAttr = getAttr(cell.text, 's');
+    const newCellXml = buildCellXml(ref, sAttr, 'empty', null);
+    rowInfo.text = rowInfo.text.slice(0, cell.index) + newCellXml + rowInfo.text.slice(cell.index+cell.length);
+  }
+  serialize(){
+    const entries = Object.values(this.rows).sort((a,b)=>b.start-a.start);
+    let out = this.sheetXml;
+    for (const info of entries){
+      out = out.slice(0, info.start) + info.text + out.slice(info.end);
+    }
+    return out;
+  }
+}
 
 async function getSheetFilePath(zip, sheetName){
   const wbXml = await zip.file('xl/workbook.xml').async('string');
-  const wbDoc = new DOMParser().parseFromString(wbXml, 'application/xml');
-  const sheets = wbDoc.getElementsByTagNameNS(XLNS,'sheet');
-  let rid = null;
-  for (let i=0;i<sheets.length;i++){
-    if (sheets[i].getAttribute('name') === sheetName){
-      rid = sheets[i].getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id')
-            || sheets[i].getAttribute('r:id');
-      break;
+  const sheetTagRe = /<sheet\s+([^>]*)\/?>/g;
+  let mm, rid = null;
+  while ((mm = sheetTagRe.exec(wbXml))){
+    if (mm[1].includes(`name="${sheetName}"`)){
+      const ridm = mm[1].match(/r:id="([^"]+)"/);
+      if (ridm){ rid = ridm[1]; break; }
     }
   }
   if (!rid) throw new Error('ไม่พบชีต "'+sheetName+'" ในไฟล์แบบฟอร์ม');
   const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
-  const relsDoc = new DOMParser().parseFromString(relsXml, 'application/xml');
-  const rels = relsDoc.getElementsByTagName('Relationship');
-  for (let i=0;i<rels.length;i++){
-    if (rels[i].getAttribute('Id') === rid){
-      return 'xl/' + rels[i].getAttribute('Target').replace(/^\/?xl\//,'');
-    }
-  }
-  throw new Error('หา path ของชีตไม่เจอ');
-}
-
-function getRowEl(sheetData, rowNum){
-  const rows = sheetData.getElementsByTagNameNS(XLNS,'row');
-  for (let i=0;i<rows.length;i++){
-    if (parseInt(rows[i].getAttribute('r'),10) === rowNum) return rows[i];
-  }
-  return null;
-}
-function getCellEl(rowEl, ref){
-  const cells = rowEl.getElementsByTagNameNS(XLNS,'c');
-  for (let i=0;i<cells.length;i++){
-    if (cells[i].getAttribute('r') === ref) return cells[i];
-  }
-  return null;
-}
-function setCellNumber(doc, cellEl, num){
-  while (cellEl.firstChild) cellEl.removeChild(cellEl.firstChild);
-  cellEl.removeAttribute('t');
-  const v = doc.createElementNS(XLNS,'v');
-  v.appendChild(doc.createTextNode(String(num)));
-  cellEl.appendChild(v);
-}
-function setCellString(doc, cellEl, str){
-  while (cellEl.firstChild) cellEl.removeChild(cellEl.firstChild);
-  cellEl.setAttribute('t','inlineStr');
-  const is = doc.createElementNS(XLNS,'is');
-  const t = doc.createElementNS(XLNS,'t');
-  t.appendChild(doc.createTextNode(str));
-  t.setAttributeNS(XMLNS_XML,'xml:space','preserve');
-  is.appendChild(t);
-  cellEl.appendChild(is);
-}
-function setCellFormula(doc, cellEl, formula){
-  while (cellEl.firstChild) cellEl.removeChild(cellEl.firstChild);
-  cellEl.removeAttribute('t');
-  const f = doc.createElementNS(XLNS,'f');
-  f.appendChild(doc.createTextNode(formula));
-  cellEl.appendChild(f);
-}
-function clearCellEl(cellEl){
-  while (cellEl.firstChild) cellEl.removeChild(cellEl.firstChild);
-  cellEl.removeAttribute('t');
+  const relRe = new RegExp(`<Relationship[^>]*Id="${rid}"[^>]*Target="([^"]+)"`);
+  const relM = relsXml.match(relRe);
+  if (!relM) throw new Error('หา path ของชีตไม่เจอ');
+  return 'xl/' + relM[1].replace(/^\/?xl\//,'');
 }
 
 async function buildOutput(templateBuf, entries, outDateStr){
@@ -504,24 +545,14 @@ async function buildOutput(templateBuf, entries, outDateStr){
 
   const sheetPath = await getSheetFilePath(zip, 'ใบยาว');
   const xmlText = await zip.file(sheetPath).async('string');
-  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
-  const sheetData = doc.getElementsByTagNameNS(XLNS,'sheetData')[0];
-
-  function cellAt(rowNum, colLetter){
-    const rowEl = getRowEl(sheetData, rowNum);
-    if (!rowEl) throw new Error('ไม่พบแถวที่ '+rowNum+' ในชีตใบยาว (โครงสร้างไฟล์แบบฟอร์มอาจต่างจากที่คาดไว้)');
-    const ref = colLetter+rowNum;
-    const c = getCellEl(rowEl, ref);
-    if (!c) throw new Error('ไม่พบเซลล์ '+ref+' ในชีตใบยาว');
-    return c;
-  }
+  const editor = new RowEditor(xmlText);
 
   // clear all 15 blocks first (rows 7-156, cols A-O)
   for (let i=0;i<15;i++){
     const r0 = 7+i*10;
     for (let r=r0;r<r0+10;r++){
       for (const col of ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O']){
-        try{ clearCellEl(cellAt(r,col)); } catch(e){}
+        editor.clearCell(r,col);
       }
     }
   }
@@ -529,48 +560,48 @@ async function buildOutput(templateBuf, entries, outDateStr){
   entries.forEach((e,i)=>{
     const row0 = 7+i*10;
     const code = e.code;
-    setCellString(doc, cellAt(row0,'A'), code || '');
-    setCellNumber(doc, cellAt(row0,'D'), 1);
-    setCellNumber(doc, cellAt(row0,'C'), e.trip);
+    editor.setCell(row0,'A','inlineStr', code || '');
+    editor.setCell(row0,'D','number', 1);
+    editor.setCell(row0,'C','number', e.trip);
     if (code){
       const fallback = (e.name||'').replace(/"/g,'""');
-      setCellFormula(doc, cellAt(row0,'B'), `IFERROR(VLOOKUP($A${row0},'ชื่อลูกค้า'!$A$2:$F$${custRowCount},3,FALSE()),"${fallback}")`);
-      setCellFormula(doc, cellAt(row0,'N'), `IFERROR(VLOOKUP(A${row0},'ชื่อลูกค้า'!$A$2:$F$${custRowCount},6,FALSE()),"")`);
+      editor.setCell(row0,'B','formula', `IFERROR(VLOOKUP($A${row0},'ชื่อลูกค้า'!$A$2:$F$${custRowCount},3,FALSE()),"${fallback}")`);
+      editor.setCell(row0,'N','formula', `IFERROR(VLOOKUP(A${row0},'ชื่อลูกค้า'!$A$2:$F$${custRowCount},6,FALSE()),"")`);
     } else {
-      setCellString(doc, cellAt(row0,'B'), e.name);
+      editor.setCell(row0,'B','inlineStr', e.name);
     }
-    if (e.note) setCellString(doc, cellAt(row0,'M'), e.note);
-    setCellFormula(doc, cellAt(row0,'L'), `SUM(F${row0}:K${row0+7})/12`);
+    if (e.note) editor.setCell(row0,'M','inlineStr', e.note);
+    editor.setCell(row0,'L','formula', `SUM(F${row0}:K${row0+7})/12`);
 
     YB_COLOR_ORDER.forEach((cname,ci)=>{
       const r = row0+ci;
-      setCellString(doc, cellAt(r,'E'), cname);
+      editor.setCell(r,'E','inlineStr', cname);
       if (ci>0){
-        setCellFormula(doc, cellAt(r,'C'), `C${r-1}`);
-        setCellFormula(doc, cellAt(r,'D'), `D${r-1}`);
+        editor.setCell(r,'C','formula', `C${r-1}`);
+        editor.setCell(r,'D','formula', `D${r-1}`);
       }
       const vals = e.colors[cname];
       if (vals){
         const cols = ['F','G','H','I','J','K'];
-        vals.forEach((v,j)=>{ if (v) setCellNumber(doc, cellAt(r,cols[j]), v); });
+        vals.forEach((v,j)=>{ if (v) editor.setCell(r,cols[j],'number', v); });
       }
-      if (ci===2 && e.so) setCellString(doc, cellAt(r,'B'), e.so);
+      if (ci===2 && e.so) editor.setCell(r,'B','inlineStr', e.so);
     });
     const rSpacer = row0+9;
-    setCellFormula(doc, cellAt(rSpacer,'C'), `C${rSpacer-1}`);
-    setCellFormula(doc, cellAt(rSpacer,'D'), `D${rSpacer-1}`);
+    editor.setCell(rSpacer,'C','formula', `C${rSpacer-1}`);
+    editor.setCell(rSpacer,'D','formula', `D${rSpacer-1}`);
   });
 
   // I2 date cell (already numeric-date formatted in the template; write as a date serial)
   const epoch = Date.UTC(1899,11,30);
   const [oy,om,od] = outDateStr.split('-').map(Number);
   const serial = Math.round((Date.UTC(oy,om-1,od) - epoch)/86400000);
-  setCellNumber(doc, cellAt(2,'I'), serial);
+  editor.setCell(2,'I','number', serial);
 
   // clear the old batch-specific note
-  try{ clearCellEl(cellAt(173,'C')); }catch(e){}
+  editor.clearCell(173,'C');
 
-  const newXml = new XMLSerializer().serializeToString(doc);
+  const newXml = editor.serialize();
   zip.file(sheetPath, newXml);
 
   // force Excel to recalculate all formulas on open
