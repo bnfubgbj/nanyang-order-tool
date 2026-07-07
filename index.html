@@ -100,6 +100,13 @@
   button.primary:active{transform:scale(.98);}
   button.primary:disabled{background:#2a3245; color:#5c6779; cursor:not-allowed;}
 
+  button.secondary{
+    background:transparent; color:var(--sub); border:1px solid var(--card-border); border-radius:9px;
+    padding:12px 20px; font-size:13.5px; font-weight:600; cursor:pointer;
+    transition:border-color .15s, color .15s;
+  }
+  button.secondary:hover{border-color:var(--bad); color:var(--bad);}
+
   .msg{padding:12px 15px; border-radius:9px; font-size:13px; margin-top:16px; display:none; line-height:1.7;}
   .msg.show{display:block;}
   .msg.err{background:var(--bad-bg); color:var(--bad); border:1px solid rgba(240,96,92,.3);}
@@ -171,7 +178,10 @@
     </label>
 
     <div class="footline">
-      <button class="primary" id="btn-parse" disabled>ประมวลผลไฟล์ข้อมูล →</button>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="primary" id="btn-parse" disabled>ประมวลผลไฟล์ข้อมูล →</button>
+        <button class="secondary" id="btn-reset" type="button">ล้างข้อมูล / เริ่มใหม่</button>
+      </div>
       <span class="stepline">ขั้นตอนที่ 1 — อัปโหลดครบ 2 ไฟล์แล้วกดประมวลผล</span>
     </div>
     <div class="msg" id="msg-parse"></div>
@@ -370,6 +380,28 @@ function renderPreview(entries, warnings){
     showMsg('msg-parse', 'พบ ' + entries.length + ' รายการ ไม่มีจุดที่ต้องตรวจสอบเพิ่มเติม', 'ok');
   }
 }
+
+document.getElementById('btn-reset').addEventListener('click', ()=>{
+  templateBuf = null; sourceBuf = null; parsedEntries = null;
+
+  ['drop-template','drop-source'].forEach(id=>{
+    document.getElementById(id).classList.remove('has-file','drag-over');
+  });
+  document.getElementById('name-template').textContent = '';
+  document.getElementById('name-source').textContent = '';
+  document.getElementById('file-template').value = '';
+  document.getElementById('file-source').value = '';
+
+  const note = document.getElementById('auto-assign-note');
+  if (note) note.textContent = '';
+
+  document.getElementById('preview-table').innerHTML = '';
+  document.getElementById('card-preview').style.display = 'none';
+
+  hideMsg('msg-parse');
+  hideMsg('msg-build');
+  checkReady();
+});
 
 document.getElementById('btn-parse').addEventListener('click', ()=>{
   hideMsg('msg-parse');
