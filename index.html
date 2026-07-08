@@ -568,9 +568,36 @@ async function stripBrokenExternalLinks(zip){
   });
 }
 
+async function stripStaleCalcChain(zip){
+  // calcChain.xml is just a cached calculation-order optimization. Once we
+  // add/remove formulas in cells, this cache no longer matches reality and
+  // Excel's strict validator flags it as corrupt content to "repair" on
+  // every open. Excel rebuilds this file automatically and safely, so the
+  // simplest fix is to drop it entirely rather than try to patch it.
+  const calcChainPath = 'xl/calcChain.xml';
+  if (zip.file(calcChainPath)) zip.remove(calcChainPath);
+
+  const relsPath = 'xl/_rels/workbook.xml.rels';
+  const relsFile = zip.file(relsPath);
+  if (relsFile){
+    let relsXml = await relsFile.async('string');
+    relsXml = relsXml.replace(/<Relationship[^>]*Type="[^"]*\/calcChain"[^>]*\/>/g, '');
+    zip.file(relsPath, relsXml);
+  }
+
+  const ctPath = '[Content_Types].xml';
+  const ctFile = zip.file(ctPath);
+  if (ctFile){
+    let ctXml = await ctFile.async('string');
+    ctXml = ctXml.replace(/<Override[^>]*calcChain[^>]*\/>/g, '');
+    zip.file(ctPath, ctXml);
+  }
+}
+
 async function buildOutput(templateBuf, entries, outDateStr){
   const zip = await JSZip.loadAsync(templateBuf);
   await stripBrokenExternalLinks(zip);
+  await stripStaleCalcChain(zip);
 
   // read-only pass (via SheetJS) just to get customer-table row count and sanity-check sheets exist
   const wbForRead = XLSX.read(templateBuf, {type:'array'});
