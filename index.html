@@ -173,7 +173,7 @@
     </div>
 
     <label class="field">
-      <span>วันที่ของงวดนี้ (ใช้ตั้งชื่อไฟล์ + แสดงบนหัวชีต)</span>
+      <span>วันที่ของงวดนี้ (ใช้ตั้งชื่อไฟล์ + แสดงบนหัวชีต — เติมอัตโนมัติจากชื่อไฟล์ข้อมูลสั่งเข้า ถ้าเจอรูปแบบ วัน.เดือน)</span>
       <input type="date" id="out-date" value="2026-07-08">
     </label>
 
@@ -209,6 +209,7 @@ const YB_COLOR_ORDER = ['น้ำเงิน','เขียว','แดง','�
 const LABEL_MAP = {'ดำ หน้าขาว':'ดำ/ขาว'};
 
 let templateBuf = null, sourceBuf = null, parsedEntries = null;
+let templateFileName = null, sourceFileName = null;
 
 function readFileAsArrayBuffer(file){
   return new Promise((res,rej)=>{
@@ -235,12 +236,27 @@ function wireDropzone(dropId, fileId, nameId, onFile){
     const buf = await readFileAsArrayBuffer(f);
     drop.classList.add('has-file');
     document.getElementById(nameId).textContent = f.name;
-    onFile(buf);
+    onFile(buf, f.name);
   }
 }
 
-wireDropzone('drop-template','file-template','name-template', buf=>{ templateBuf = buf; checkReady(); autoAssign(); });
-wireDropzone('drop-source','file-source','name-source', buf=>{ sourceBuf = buf; checkReady(); autoAssign(); });
+wireDropzone('drop-template','file-template','name-template', (buf,name)=>{ templateBuf = buf; templateFileName = name; checkReady(); autoAssign(); });
+wireDropzone('drop-source','file-source','name-source', (buf,name)=>{ sourceBuf = buf; sourceFileName = name; checkReady(); autoAssign(); });
+
+// Try to read a "D.M" style date out of the source file's own name
+// (e.g. "สั่งเข้า 8.7.xlsx" -> 8 July) and use it to prefill the date field,
+// since that's the convention this file naming already follows.
+function applyDateFromSourceFilename(filename){
+  if (!filename) return;
+  const m = filename.match(/(?<!\d)(\d{1,2})\.(\d{1,2})(?!\d)/);
+  if (!m) return;
+  const day = parseInt(m[1],10), month = parseInt(m[2],10);
+  if (day<1||day>31||month<1||month>12) return;
+  const dateInput = document.getElementById('out-date');
+  const currentYear = dateInput.value ? parseInt(dateInput.value.split('-')[0],10) : new Date().getFullYear();
+  const dd = String(day).padStart(2,'0'), mm = String(month).padStart(2,'0');
+  dateInput.value = `${currentYear}-${mm}-${dd}`;
+}
 
 function identifyBuffer(buf){
   if (!buf) return 'unknown';
@@ -269,6 +285,7 @@ function autoAssign(){
   if (kindInTemplateSlot === 'source' && kindInSourceSlot === 'template'){
     // swapped: fix silently
     [templateBuf, sourceBuf] = [sourceBuf, templateBuf];
+    [templateFileName, sourceFileName] = [sourceFileName, templateFileName];
     const nameTemplateEl = document.getElementById('name-template');
     const nameSourceEl = document.getElementById('name-source');
     const tmp = nameTemplateEl.textContent;
@@ -282,6 +299,7 @@ function autoAssign(){
   } else {
     note.textContent = '';
   }
+  applyDateFromSourceFilename(sourceFileName);
 }
 
 function checkReady(){ document.getElementById('btn-parse').disabled = !(templateBuf && sourceBuf); }
@@ -383,6 +401,7 @@ function renderPreview(entries, warnings){
 
 document.getElementById('btn-reset').addEventListener('click', ()=>{
   templateBuf = null; sourceBuf = null; parsedEntries = null;
+  templateFileName = null; sourceFileName = null;
 
   ['drop-template','drop-source'].forEach(id=>{
     document.getElementById(id).classList.remove('has-file','drag-over');
@@ -660,8 +679,8 @@ async function buildOutput(templateBuf, entries, outDateStr){
   const serial = Math.round((Date.UTC(oy,om-1,od) - epoch)/86400000);
   editor.setCell(2,'I','number', serial);
 
-  // clear the old batch-specific note
-  editor.clearCell(173,'C');
+  // standing note (red bold text already baked into this cell's style)
+  editor.setCell(173,'C','inlineStr', 'ชุดนี้มี NATURE นะคะ');
 
   const newXml = editor.serialize();
   zip.file(sheetPath, newXml);
