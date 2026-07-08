@@ -534,8 +534,43 @@ async function getSheetFilePath(zip, sheetName){
   return 'xl/' + relM[1].replace(/^\/?xl\//,'');
 }
 
+async function stripBrokenExternalLinks(zip){
+  // The original template carries a stale external-workbook link (a defined
+  // name "dataAgent" pointing at a 2014-era file on someone else's computer)
+  // left over from years ago. It isn't used by any formula, but Excel's
+  // strict validator flags the dangling link and offers to "repair" the
+  // file on every open. We remove it so the file opens cleanly.
+  const wbPath = 'xl/workbook.xml';
+  let wbXml = await zip.file(wbPath).async('string');
+  wbXml = wbXml.replace(/<externalReferences>[\s\S]*?<\/externalReferences>/, '');
+  wbXml = wbXml.replace(/<definedName name="dataAgent"[^<]*<\/definedName>/, '');
+  zip.file(wbPath, wbXml);
+
+  const relsPath = 'xl/_rels/workbook.xml.rels';
+  const relsFile = zip.file(relsPath);
+  if (relsFile){
+    let relsXml = await relsFile.async('string');
+    const beforeLen = relsXml.length;
+    relsXml = relsXml.replace(/<Relationship[^>]*Type="[^"]*\/externalLink"[^>]*\/>/g, '');
+    if (relsXml.length !== beforeLen) zip.file(relsPath, relsXml);
+  }
+
+  const ctPath = '[Content_Types].xml';
+  const ctFile = zip.file(ctPath);
+  if (ctFile){
+    let ctXml = await ctFile.async('string');
+    ctXml = ctXml.replace(/<Override[^>]*externalLink[^>]*\/>/g, '');
+    zip.file(ctPath, ctXml);
+  }
+
+  Object.keys(zip.files).forEach(path=>{
+    if (path.startsWith('xl/externalLinks/')) zip.remove(path);
+  });
+}
+
 async function buildOutput(templateBuf, entries, outDateStr){
   const zip = await JSZip.loadAsync(templateBuf);
+  await stripBrokenExternalLinks(zip);
 
   // read-only pass (via SheetJS) just to get customer-table row count and sanity-check sheets exist
   const wbForRead = XLSX.read(templateBuf, {type:'array'});
